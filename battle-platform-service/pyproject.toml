@@ -4,4 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "fastapi>=0.165.0",
+    "psycopg[binary]>=3.3.9",
+    "redis>=8.2.0",
+    "uvicorn[standard]>=0.54.0",
+]
