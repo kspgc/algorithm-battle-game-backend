@@ -20,24 +20,46 @@ type Pool struct {
 	closed     bool
 }
 
+const cleanupTimeout = 5 * time.Second
+
 func (pool *Pool) createWarmContainer(ctx context.Context) (*Sandbox, error) {
+	containerID, err := pool.createContainer(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := pool.startContainer(ctx, containerID); err != nil {
+		pool.cleanupContainer(containerID)
+		return nil, err
+	}
+
+	return &Sandbox{ID: containerID}, nil
+}
+
+func (pool *Pool) createContainer(ctx context.Context) (string, error) {
 	containerConfig, hostConfig, err := pool.environment.toDockerConfigs()
 	if err != nil {
-		return nil, fmt.Errorf("build docker configs: %w", err)
+		return "", fmt.Errorf("build docker configs: %w", err)
 	}
 
 	created, err := pool.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
-		return nil, fmt.Errorf("create %s container: %w", pool.environment.Name, err)
+		return "", fmt.Errorf("create %s container: %w", pool.environment.Name, err)
 	}
 
-	if err := pool.client.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = pool.client.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true})
+	return created.ID, nil
+}
 
-		return nil, fmt.Errorf("start %s container %s: %w", pool.environment.Name, created.ID, err)
+func (pool *Pool) startContainer(ctx context.Context, containerID string) error {
+	if err := pool.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("start %s container %s: %w", pool.environment.Name, containerID, err)
 	}
+	return nil
+}
 
-	return &Sandbox{ID: created.ID}, nil
+func (pool *Pool) cleanupContainer(containerID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+
+	_ = pool.client.ContainerRemove(cleanupCtx, containerID, container.RemoveOptions{Force: true})
 }
