@@ -59,8 +59,6 @@ func (pool *Pool) Release(sandbox *Sandbox) {
 	go pool.replaceSandbox(sandbox)
 }
 
-// === === === === === === === === === === === === === === === === === === === ===
-
 func (pool *Pool) Close(ctx context.Context) error {
 	targets, ok := pool.closeAndDrain()
 	if !ok {
@@ -69,6 +67,8 @@ func (pool *Pool) Close(ctx context.Context) error {
 
 	return pool.destroyAll(ctx, targets)
 }
+
+// === === === === === === === === === === === === === === === === === === === ===
 
 func (pool *Pool) isClosed() bool {
 	pool.activeLock.Lock()
