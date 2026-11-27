@@ -1,8 +1,25 @@
 package sandbox
 
-import "github.com/docker/docker/api/types/container"
+import (
+	"errors"
+	"fmt"
+	"strings"
 
-const defaultWorkingDir = "/workspace"
+	"github.com/docker/docker/api/types/container"
+)
+
+const (
+	bytesPerMB        = 1024 * 1024
+	nanoCPUsPerCore   = 1_000_000_000
+	defaultWorkingDir = "/workspace"
+)
+
+var (
+	ErrEmptyImageName     = errors.New("image name cannot be empty")
+	ErrInvalidMemoryLimit = errors.New("memory limit must be greater than or equal to 0")
+	ErrInvalidCPUQuota    = errors.New("cpu quota must be greater than or equal to 0")
+	ErrInvalidPidsLimit   = errors.New("max process count must be greater than or equal to 0")
+)
 
 type SandboxEnvironmentConfig struct {
 	Name            string
@@ -32,33 +49,69 @@ var (
 	}
 )
 
-func (config SandboxEnvironmentConfig) toDockerConfigs() (*container.Config, *container.HostConfig) {
-	workingDir := config.WorkingDir
-	if workingDir == "" {
-		workingDir = defaultWorkingDir
+func (config SandboxEnvironmentConfig) toDockerConfigs() (*container.Config, *container.HostConfig, error) {
+	if err := config.validate(); err != nil {
+		return nil, nil, fmt.Errorf("invalid sandbox config: %w", err)
 	}
 
-	cmd := config.Cmd
-	if len(cmd) == 0 {
-		cmd = []string{"sleep", "infinity"}
-	}
+	return config.buildContainerConfig(), config.buildHostConfig(), nil
+}
 
-	containerConfig := &container.Config{
+func (config SandboxEnvironmentConfig) validate() error {
+	if strings.TrimSpace(config.ImageName) == "" {
+		return ErrEmptyImageName
+	}
+	if config.MemoryLimitMB < 0 {
+		return fmt.Errorf("%w: got %d", ErrInvalidMemoryLimit, config.MemoryLimitMB)
+	}
+	if config.CPUQuotaCores < 0 {
+		return fmt.Errorf("%w: got %f", ErrInvalidCPUQuota, config.CPUQuotaCores)
+	}
+	if config.MaxProcessCount < 0 {
+		return fmt.Errorf("%w: got %d", ErrInvalidPidsLimit, config.MaxProcessCount)
+	}
+	return nil
+}
+
+func (config SandboxEnvironmentConfig) buildContainerConfig() *container.Config {
+	return &container.Config{
 		Image:           config.ImageName,
-		WorkingDir:      workingDir,
-		Cmd:             cmd,
+		WorkingDir:      config.resolvedWorkingDir(),
+		Cmd:             config.resolvedCmd(),
 		NetworkDisabled: config.NetworkDisabled,
 		Tty:             false,
 	}
+}
 
-	pidsLimit := config.MaxProcessCount
-	hostConfig := &container.HostConfig{
-		Resources: container.Resources{
-			Memory:    config.MemoryLimitMB * 1024 * 1024,
-			NanoCPUs:  int64(config.CPUQuotaCores * 1_000_000_000),
-			PidsLimit: &pidsLimit,
-		},
+func (config SandboxEnvironmentConfig) buildHostConfig() *container.HostConfig {
+	var resources container.Resources
+
+	if config.MemoryLimitMB > 0 {
+		resources.Memory = config.MemoryLimitMB * bytesPerMB
+	}
+	if config.CPUQuotaCores > 0 {
+		resources.NanoCPUs = int64(config.CPUQuotaCores * nanoCPUsPerCore)
+	}
+	if config.MaxProcessCount > 0 {
+		pidsLimit := config.MaxProcessCount
+		resources.PidsLimit = &pidsLimit
 	}
 
-	return containerConfig, hostConfig
+	return &container.HostConfig{
+		Resources: resources,
+	}
+}
+
+func (config SandboxEnvironmentConfig) resolvedWorkingDir() string {
+	if config.WorkingDir == "" {
+		return defaultWorkingDir
+	}
+	return config.WorkingDir
+}
+
+func (config SandboxEnvironmentConfig) resolvedCmd() []string {
+	if len(config.Cmd) == 0 {
+		return []string{"sleep", "infinity"}
+	}
+	return config.Cmd
 }
