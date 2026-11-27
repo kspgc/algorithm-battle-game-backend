@@ -1,5 +1,14 @@
+root = "."
+tmp_dir = "tmp"
+
 [build]
-  cmd = "go build -o ./tmp/main ."
+  cmd = "go build -o ./tmp/main ./cmd/worker"
   bin = "./tmp/main"
-  include_ext = ["go"]
-  exclude_dir = ["tmp", "vendor"]
+  include_ext = ["go", "yaml", "env"]
+  exclude_dir = ["tmp", "vendor", "deployments", "judge-workspaces"]
+  delay = 500
+  send_interrupt = true
+  kill_delay = "2s"
+
+[misc]
+  clean_on_exit = true
