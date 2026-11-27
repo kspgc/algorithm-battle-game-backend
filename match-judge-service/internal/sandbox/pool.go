@@ -2,12 +2,18 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+)
+
+var (
+	ErrPoolClosed     = errors.New("sandbox pool is closed")
+	ErrUnownedSandbox = errors.New("sandbox does not belong to this pool")
 )
 
 type Pool struct {
@@ -62,4 +68,128 @@ func (pool *Pool) cleanupContainer(containerID string) {
 	defer cancel()
 
 	_ = pool.client.ContainerRemove(cleanupCtx, containerID, container.RemoveOptions{Force: true})
+}
+
+func (pool *Pool) Acquire(ctx context.Context) (*Sandbox, error) {
+	if pool.isClosed() {
+		return nil, ErrPoolClosed
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("acquire sandbox: %w", ctx.Err())
+	case sandbox, ok := <-pool.idle:
+		if !ok || sandbox == nil {
+			return nil, ErrPoolClosed
+		}
+		return sandbox, nil
+	}
+}
+
+func (pool *Pool) isClosed() bool {
+	pool.activeLock.Lock()
+	defer pool.activeLock.Unlock()
+	return pool.closed
+}
+
+func (pool *Pool) Release(sandbox *Sandbox) {
+	if sandbox == nil {
+		return
+	}
+
+	if !pool.unregister(sandbox) {
+		return
+	}
+
+	go pool.replaceSandbox(sandbox)
+}
+
+func (pool *Pool) unregister(sandbox *Sandbox) bool {
+	pool.activeLock.Lock()
+	defer pool.activeLock.Unlock()
+
+	if _, exists := pool.active[sandbox]; !exists {
+		return false
+	}
+	delete(pool.active, sandbox)
+	return true
+}
+
+func (pool *Pool) replaceSandbox(oldSandbox *Sandbox) {
+	pool.cleanupContainer(oldSandbox.ID)
+
+	if pool.isClosed() {
+		return
+	}
+
+	createCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	newSandbox, err := pool.createWarmContainer(createCtx)
+	if err != nil {
+		// TODO: 可在此接入專案的 Logger 記錄補建失敗
+		return
+	}
+
+	if !pool.register(newSandbox) {
+		pool.cleanupContainer(newSandbox.ID)
+		return
+	}
+
+	pool.idle <- newSandbox
+}
+
+func (pool *Pool) register(sandbox *Sandbox) bool {
+	pool.activeLock.Lock()
+	defer pool.activeLock.Unlock()
+
+	if pool.closed {
+		return false
+	}
+	pool.active[sandbox] = struct{}{}
+	return true
+}
+
+func (pool *Pool) Close(ctx context.Context) error {
+	pool.activeLock.Lock()
+	if pool.closed {
+		pool.activeLock.Unlock()
+		return nil
+	}
+	pool.closed = true
+	close(pool.idle)
+
+	targets := make([]*Sandbox, 0, len(pool.active))
+	for sandbox := range pool.active {
+		targets = append(targets, sandbox)
+	}
+
+	clear(pool.active)
+	pool.activeLock.Unlock()
+
+	return pool.destroyAll(ctx, targets)
+}
+
+func (pool *Pool) destroyAll(ctx context.Context, targets []*Sandbox) error {
+	var (
+		waitGroup sync.WaitGroup
+		errLock   sync.Mutex
+		errs      []error
+	)
+
+	for _, sandbox := range targets {
+		waitGroup.Add(1)
+		go func(target *Sandbox) {
+			defer waitGroup.Done()
+
+			if err := pool.client.ContainerRemove(ctx, target.ID, container.RemoveOptions{Force: true}); err != nil {
+				errLock.Lock()
+				errs = append(errs, fmt.Errorf("remove container %s: %w", target.ID, err))
+				errLock.Unlock()
+			}
+		}(sandbox)
+	}
+
+	waitGroup.Wait()
+	return errors.Join(errs...)
 }
