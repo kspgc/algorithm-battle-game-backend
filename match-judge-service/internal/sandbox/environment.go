@@ -87,7 +87,9 @@ func (config SandboxEnvironmentConfig) buildHostConfig() *container.HostConfig {
 	var resources container.Resources
 
 	if config.MemoryLimitMB > 0 {
-		resources.Memory = config.MemoryLimitMB * bytesPerMB
+		memoryBytes := config.MemoryLimitMB * bytesPerMB
+		resources.Memory = memoryBytes
+		resources.MemorySwap = memoryBytes
 	}
 	if config.CPUQuotaCores > 0 {
 		resources.NanoCPUs = int64(config.CPUQuotaCores * nanoCPUsPerCore)
@@ -97,9 +99,15 @@ func (config SandboxEnvironmentConfig) buildHostConfig() *container.HostConfig {
 		resources.PidsLimit = &pidsLimit
 	}
 
-	return &container.HostConfig{
+	hostConfig := &container.HostConfig{
 		Resources: resources,
 	}
+
+	if config.NetworkDisabled {
+		hostConfig.NetworkMode = "none"
+	}
+
+	return hostConfig
 }
 
 func (config SandboxEnvironmentConfig) resolvedWorkingDir() string {
