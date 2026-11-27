@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM base AS development
 ENV PATH="/app/.venv/bin:$PATH"
 COPY . .
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 
 FROM python:3.13-slim-bookworm AS production
@@ -24,4 +24,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 COPY --chown=appuser:appuser . .
 USER appuser
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
