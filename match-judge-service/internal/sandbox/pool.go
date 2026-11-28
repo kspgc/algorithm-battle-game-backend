@@ -208,6 +208,7 @@ func (pool *Pool) closeAndDrain() ([]*Sandbox, bool) {
 func (pool *Pool) replaceSandbox(oldSandbox *Sandbox) {
 	pool.cleanupContainer(oldSandbox.ID)
 
+	var lastErr error
 	for range maxCreateRetries {
 		if pool.isClosed() {
 			return
@@ -220,9 +221,11 @@ func (pool *Pool) replaceSandbox(oldSandbox *Sandbox) {
 			}
 			return
 		}
+
+		lastErr = err
+		time.Sleep(retryDelay)
 	}
 
 	// TODO: 可在此接入專案的 Logger 記錄補建失敗
-
-	time.Sleep(retryDelay)
+	_ = lastErr
 }
