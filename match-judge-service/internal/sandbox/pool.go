@@ -12,13 +12,14 @@ import (
 )
 
 const (
-	createTimeout  = 30 * time.Second
-	cleanupTimeout = 5 * time.Second
+	createTimeout    = 30 * time.Second
+	cleanupTimeout   = 5 * time.Second
+	maxCreateRetries = 5
+	retryDelay       = 2 * time.Second
 )
 
 var (
-	ErrPoolClosed     = errors.New("sandbox pool is closed")
-	ErrUnownedSandbox = errors.New("sandbox does not belong to this pool")
+	ErrPoolClosed = errors.New("sandbox pool is closed")
 )
 
 type Pool struct {
@@ -124,22 +125,29 @@ func (pool *Pool) closeAndDrain() ([]*Sandbox, bool) {
 func (pool *Pool) replaceSandbox(oldSandbox *Sandbox) {
 	pool.cleanupContainer(oldSandbox.ID)
 
-	if pool.isClosed() {
-		return
+	for range maxCreateRetries {
+		if pool.isClosed() {
+			return
+		}
+
+		newSandbox, err := pool.tryCreateWarmContainer()
+		if err == nil {
+			if !pool.registerAndEnqueue(newSandbox) {
+				pool.cleanupContainer(newSandbox.ID)
+			}
+			return
+		}
 	}
 
+	// TODO: 可在此接入專案的 Logger 記錄補建失敗
+
+	time.Sleep(retryDelay)
+}
+
+func (pool *Pool) tryCreateWarmContainer() (*Sandbox, error) {
 	createCtx, cancel := context.WithTimeout(context.Background(), createTimeout)
 	defer cancel()
-
-	newSandbox, err := pool.createWarmContainer(createCtx)
-	if err != nil {
-		// TODO: 可在此接入專案的 Logger 記錄補建失敗
-		return
-	}
-
-	if !pool.registerAndEnqueue(newSandbox) {
-		pool.cleanupContainer(newSandbox.ID)
-	}
+	return pool.createWarmContainer(createCtx)
 }
 
 func (pool *Pool) destroyAll(ctx context.Context, targets []*Sandbox) error {
