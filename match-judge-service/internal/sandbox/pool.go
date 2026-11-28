@@ -9,13 +9,15 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
-	createTimeout    = 30 * time.Second
-	cleanupTimeout   = 5 * time.Second
-	maxCreateRetries = 5
-	retryDelay       = 2 * time.Second
+	createTimeout      = 30 * time.Second
+	cleanupTimeout     = 5 * time.Second
+	maxCreateRetries   = 5
+	retryDelay         = 2 * time.Second
+	initCleanupTimeout = 15 * time.Second
 )
 
 var (
@@ -34,11 +36,8 @@ type Pool struct {
 }
 
 func NewPool(ctx context.Context, dockerClient *client.Client, environment SandboxEnvironmentConfig, size int) (*Pool, error) {
-	if size < 0 {
-		return nil, fmt.Errorf("%w: got %d", ErrInvalidPoolSize, size)
-	}
-	if err := environment.validate(); err != nil {
-		return nil, fmt.Errorf("invalid environment: %w", err)
+	if err := validatePoolConfig(dockerClient, environment, size); err != nil {
+		return nil, err
 	}
 
 	pool := &Pool{
@@ -49,9 +48,7 @@ func NewPool(ctx context.Context, dockerClient *client.Client, environment Sandb
 	}
 
 	if err := pool.warmup(ctx, size); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = pool.Close(cleanupCtx)
+		pool.cleanupAfterFailedInit()
 		return nil, fmt.Errorf("warmup %s pool: %w", environment.Name, err)
 	}
 
@@ -97,39 +94,56 @@ func (pool *Pool) Close(ctx context.Context) error {
 
 // === === === === === === === === === === === === === === === === === === === ===
 
-func (pool *Pool) warmup(ctx context.Context, count int) error {
-	var waitGroup sync.WaitGroup
-	var errOnce sync.Once
-	var firstErr error
+func validatePoolConfig(dockerClient *client.Client, environment SandboxEnvironmentConfig, size int) error {
+	if dockerClient == nil {
+		return errors.New("docker client cannot be nil")
+	}
+	if size < 0 {
+		return fmt.Errorf("%w: got %d", ErrInvalidPoolSize, size)
+	}
+	if err := environment.validate(); err != nil {
+		return fmt.Errorf("invalid environment: %w", err)
+	}
+	return nil
+}
 
-	warmupCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+func (pool *Pool) warmup(ctx context.Context, count int) error {
+	group, warmupCtx := errgroup.WithContext(ctx)
 
 	for range count {
-		waitGroup.Add(1)
-		go func() {
-			defer waitGroup.Done()
-
-			sandbox, err := pool.createWarmContainer(warmupCtx)
-			if err != nil {
-				errOnce.Do(func() {
-					firstErr = err
-					cancel()
-				})
-				return
-			}
-
-			if !pool.register(sandbox) {
-				pool.cleanupContainer(sandbox.ID)
-				return
-			}
-
-			pool.idle <- sandbox
-		}()
+		group.Go(func() error {
+			return pool.warmupSingle(warmupCtx)
+		})
 	}
 
-	waitGroup.Wait()
-	return firstErr
+	return group.Wait()
+}
+
+func (pool *Pool) warmupSingle(ctx context.Context) error {
+	sandbox, err := pool.createWarmContainer(ctx)
+	if err != nil {
+		return err
+	}
+
+	if !pool.register(sandbox) {
+		pool.cleanupContainer(sandbox.ID)
+		return nil
+	}
+
+	select {
+	case pool.idle <- sandbox:
+		return nil
+	case <-ctx.Done():
+		pool.cleanupContainer(sandbox.ID)
+		return ctx.Err()
+	}
+}
+
+func (pool *Pool) cleanupAfterFailedInit() {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), initCleanupTimeout)
+	defer cancel()
+
+	_ = pool.Close(cleanupCtx)
 }
 
 func (pool *Pool) register(sandbox *Sandbox) bool {
