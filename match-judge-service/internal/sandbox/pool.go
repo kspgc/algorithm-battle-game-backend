@@ -19,7 +19,8 @@ const (
 )
 
 var (
-	ErrPoolClosed = errors.New("sandbox pool is closed")
+	ErrPoolClosed      = errors.New("sandbox pool is closed")
+	ErrInvalidPoolSize = errors.New("pool size must be greater than 0")
 )
 
 type Pool struct {
@@ -30,6 +31,31 @@ type Pool struct {
 	activeLock sync.Mutex
 	active     map[*Sandbox]struct{}
 	closed     bool
+}
+
+func NewPool(ctx context.Context, dockerClient *client.Client, environment SandboxEnvironmentConfig, size int) (*Pool, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("%w: got %d", ErrInvalidPoolSize, size)
+	}
+	if err := environment.validate(); err != nil {
+		return nil, fmt.Errorf("invalid environment: %w", err)
+	}
+
+	pool := &Pool{
+		client:      dockerClient,
+		environment: environment,
+		idle:        make(chan *Sandbox, size),
+		active:      make(map[*Sandbox]struct{}, size),
+	}
+
+	if err := pool.warmup(ctx, size); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = pool.Close(cleanupCtx)
+		return nil, fmt.Errorf("warmup %s pool: %w", environment.Name, err)
+	}
+
+	return pool, nil
 }
 
 func (pool *Pool) Acquire(ctx context.Context) (*Sandbox, error) {
@@ -70,6 +96,52 @@ func (pool *Pool) Close(ctx context.Context) error {
 }
 
 // === === === === === === === === === === === === === === === === === === === ===
+
+func (pool *Pool) warmup(ctx context.Context, count int) error {
+	var waitGroup sync.WaitGroup
+	var errOnce sync.Once
+	var firstErr error
+
+	warmupCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for range count {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+
+			sandbox, err := pool.createWarmContainer(warmupCtx)
+			if err != nil {
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
+				return
+			}
+
+			if !pool.register(sandbox) {
+				pool.cleanupContainer(sandbox.ID)
+				return
+			}
+
+			pool.idle <- sandbox
+		}()
+	}
+
+	waitGroup.Wait()
+	return firstErr
+}
+
+func (pool *Pool) register(sandbox *Sandbox) bool {
+	pool.activeLock.Lock()
+	defer pool.activeLock.Unlock()
+
+	if pool.closed {
+		return false
+	}
+	pool.active[sandbox] = struct{}{}
+	return true
+}
 
 func (pool *Pool) isClosed() bool {
 	pool.activeLock.Lock()
